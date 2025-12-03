@@ -9,10 +9,27 @@ public class DungeonManager : MonoBehaviour
     public static DungeonManager Instance { get; private set; }
 
     [Header("Dungeon Generation")]
-    [SerializeField] private int dungeonWidth = 7;
-    [SerializeField] private int dungeonHeight = 7;
-    [SerializeField] private int enemyCount = 5;
-    [SerializeField] private int chestCount = 3;
+    [SerializeField] private int dungeonWidth = 20;
+    [SerializeField] private int dungeonHeight = 20;
+    [SerializeField] private int viewportWidth = 7;
+    [SerializeField] private int viewportHeight = 7;
+    [SerializeField] private int enemyCount = 8;
+    [SerializeField] private int chestCount = 5;
+
+    [Header("Room Generation")]
+    [SerializeField] private int minRooms = 4;
+    [SerializeField] private int maxRooms = 8;
+    [SerializeField] private int minRoomSize = 3;
+    [SerializeField] private int maxRoomSize = 6;
+
+    public enum RoomShape
+    {
+        Rectangle,
+        LShape,
+        TShape,
+        Cross,
+        UShape
+    }
 
     [Header("Dungeon Map UI")]
     [SerializeField] private GameObject dungeonMapPanel;
@@ -26,7 +43,35 @@ public class DungeonManager : MonoBehaviour
     [SerializeField] private Button moveLeftButton;
     [SerializeField] private Button moveRightButton;
 
-    [Header("Tile Colors")]
+    [Header("Tile Sprites")]
+    [SerializeField] private Sprite floorSprite;
+    [SerializeField] private Sprite playerSprite;
+    [SerializeField] private Sprite enemySprite;
+    [SerializeField] private Sprite chestSprite;
+    [SerializeField] private Sprite exitSprite;
+    [SerializeField] private Sprite visitedSprite;
+    [SerializeField] private Sprite fogSprite;
+
+    [Header("Wall Sprites")]
+    [SerializeField] private Sprite wallSolidSprite;
+    [SerializeField] private Sprite wallTopSprite;
+    [SerializeField] private Sprite wallBottomSprite;
+    [SerializeField] private Sprite wallLeftSprite;
+    [SerializeField] private Sprite wallRightSprite;
+
+    [Header("Outer Corner Sprites")]
+    [SerializeField] private Sprite cornerTopLeftSprite;
+    [SerializeField] private Sprite cornerTopRightSprite;
+    [SerializeField] private Sprite cornerBottomLeftSprite;
+    [SerializeField] private Sprite cornerBottomRightSprite;
+
+    [Header("Inner Corner Sprites")]
+    [SerializeField] private Sprite innerCornerTopLeftSprite;
+    [SerializeField] private Sprite innerCornerTopRightSprite;
+    [SerializeField] private Sprite innerCornerBottomLeftSprite;
+    [SerializeField] private Sprite innerCornerBottomRightSprite;
+
+    [Header("Tile Colors (used if no sprite assigned)")]
     [SerializeField] private Color floorColor = Color.gray;
     [SerializeField] private Color wallColor = Color.black;
     [SerializeField] private Color playerColor = Color.blue;
@@ -34,6 +79,10 @@ public class DungeonManager : MonoBehaviour
     [SerializeField] private Color chestColor = Color.yellow;
     [SerializeField] private Color exitColor = Color.green;
     [SerializeField] private Color visitedColor = new Color(0.5f, 0.5f, 0.5f);
+    [SerializeField] private Color fogColor = new Color(0.2f, 0.2f, 0.2f);
+
+    [Header("Fog of War")]
+    [SerializeField] private int visionRadius = 2;
 
     [Header("Player Combat Settings")]
     [SerializeField] private int playerAttackMin = 10;
@@ -71,6 +120,7 @@ public class DungeonManager : MonoBehaviour
     private Vector2Int playerPosition;
     private Vector2Int exitPosition;
     private bool[,] visitedTiles;
+    private bool[,] revealedTiles;
 
     // Dungeon progress
     private int enemiesDefeated = 0;
@@ -245,12 +295,13 @@ public class DungeonManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Generates a random connected dungeon layout.
+    /// Generates a dungeon with rooms of various shapes connected by corridors.
     /// </summary>
     private void GenerateDungeon()
     {
         dungeonGrid = new TileType[dungeonWidth, dungeonHeight];
         visitedTiles = new bool[dungeonWidth, dungeonHeight];
+        revealedTiles = new bool[dungeonWidth, dungeonHeight];
 
         // Fill with walls
         for (int x = 0; x < dungeonWidth; x++)
@@ -259,72 +310,313 @@ public class DungeonManager : MonoBehaviour
             {
                 dungeonGrid[x, y] = TileType.Wall;
                 visitedTiles[x, y] = false;
+                revealedTiles[x, y] = false;
             }
         }
 
-        // Generate path using random walk
-        List<Vector2Int> path = new List<Vector2Int>();
-        Vector2Int current = new Vector2Int(0, dungeonHeight / 2);
-        dungeonGrid[current.x, current.y] = TileType.Start;
-        playerPosition = current;
-        path.Add(current);
+        // Generate rooms
+        List<Room> rooms = new List<Room>();
+        int roomCount = UnityEngine.Random.Range(minRooms, maxRooms + 1);
 
-        // Random walk to create connected path
-        int steps = (dungeonWidth * dungeonHeight) / 2;
-        for (int i = 0; i < steps; i++)
+        for (int i = 0; i < roomCount; i++)
         {
-            List<Vector2Int> directions = new List<Vector2Int>
+            Room room = TryCreateRoom(rooms);
+            if (room != null)
             {
-                Vector2Int.up, Vector2Int.down, Vector2Int.left, Vector2Int.right
-            };
-
-            // Shuffle directions
-            for (int j = directions.Count - 1; j > 0; j--)
-            {
-                int rand = UnityEngine.Random.Range(0, j + 1);
-                Vector2Int temp = directions[j];
-                directions[j] = directions[rand];
-                directions[rand] = temp;
+                rooms.Add(room);
+                CarveRoom(room);
             }
+        }
 
-            foreach (var dir in directions)
+        // Connect rooms with corridors
+        for (int i = 1; i < rooms.Count; i++)
+        {
+            ConnectRooms(rooms[i - 1], rooms[i]);
+        }
+
+        // Set player start position in first room
+        if (rooms.Count > 0)
+        {
+            playerPosition = rooms[0].center;
+            dungeonGrid[playerPosition.x, playerPosition.y] = TileType.Start;
+        }
+
+        // Place exit in last room
+        if (rooms.Count > 1)
+        {
+            exitPosition = rooms[rooms.Count - 1].center;
+            dungeonGrid[exitPosition.x, exitPosition.y] = TileType.Exit;
+        }
+        else
+        {
+            exitPosition = FindFurthestFloor(playerPosition);
+            dungeonGrid[exitPosition.x, exitPosition.y] = TileType.Exit;
+        }
+
+        // Place enemies and chests
+        PlaceRandomTiles(TileType.Enemy, enemyCount);
+        PlaceRandomTiles(TileType.Chest, chestCount);
+
+        // Reveal tiles around starting position
+        RevealTilesAroundPlayer();
+    }
+
+    /// <summary>
+    /// Tries to create a room that doesn't overlap with existing rooms.
+    /// </summary>
+    private Room TryCreateRoom(List<Room> existingRooms)
+    {
+        int maxAttempts = 30;
+
+        for (int attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            int width = UnityEngine.Random.Range(minRoomSize, maxRoomSize + 1);
+            int height = UnityEngine.Random.Range(minRoomSize, maxRoomSize + 1);
+            int x = UnityEngine.Random.Range(2, dungeonWidth - width - 2);
+            int y = UnityEngine.Random.Range(2, dungeonHeight - height - 2);
+
+            RoomShape shape = (RoomShape)UnityEngine.Random.Range(0, 5);
+            Room room = new Room(x, y, width, height, shape);
+
+            bool overlaps = false;
+            foreach (Room existing in existingRooms)
             {
-                Vector2Int next = current + dir;
-                if (IsInBounds(next))
+                if (RoomsOverlap(room, existing))
                 {
-                    if (dungeonGrid[next.x, next.y] == TileType.Wall)
-                    {
-                        dungeonGrid[next.x, next.y] = TileType.Floor;
-                        path.Add(next);
-                    }
-                    current = next;
+                    overlaps = true;
                     break;
                 }
             }
+
+            if (!overlaps)
+                return room;
         }
 
-        // Add some extra floor tiles for branching
-        foreach (var tile in path)
+        return null;
+    }
+
+    /// <summary>
+    /// Checks if two rooms overlap (with padding).
+    /// </summary>
+    private bool RoomsOverlap(Room a, Room b)
+    {
+        int padding = 2;
+        return a.x - padding < b.x + b.width + padding &&
+               a.x + a.width + padding > b.x - padding &&
+               a.y - padding < b.y + b.height + padding &&
+               a.y + a.height + padding > b.y - padding;
+    }
+
+    /// <summary>
+    /// Carves out a room based on its shape.
+    /// </summary>
+    private void CarveRoom(Room room)
+    {
+        switch (room.shape)
         {
-            List<Vector2Int> neighbors = GetNeighbors(tile);
-            foreach (var neighbor in neighbors)
+            case RoomShape.Rectangle:
+                CarveRectangle(room.x, room.y, room.width, room.height);
+                break;
+
+            case RoomShape.LShape:
+                CarveLShape(room);
+                break;
+
+            case RoomShape.TShape:
+                CarveTShape(room);
+                break;
+
+            case RoomShape.Cross:
+                CarveCross(room);
+                break;
+
+            case RoomShape.UShape:
+                CarveUShape(room);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Carves a rectangular area.
+    /// </summary>
+    private void CarveRectangle(int startX, int startY, int width, int height)
+    {
+        for (int x = startX; x < startX + width; x++)
+        {
+            for (int y = startY; y < startY + height; y++)
             {
-                if (UnityEngine.Random.value < 0.3f && dungeonGrid[neighbor.x, neighbor.y] == TileType.Wall)
+                if (IsInsideBorder(new Vector2Int(x, y)))
+                    dungeonGrid[x, y] = TileType.Floor;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Carves an L-shaped room.
+    /// </summary>
+    private void CarveLShape(Room room)
+    {
+        int halfWidth = room.width / 2;
+        int halfHeight = room.height / 2;
+
+        // Vertical part
+        CarveRectangle(room.x, room.y, halfWidth + 1, room.height);
+        // Horizontal part
+        CarveRectangle(room.x, room.y, room.width, halfHeight + 1);
+    }
+
+    /// <summary>
+    /// Carves a T-shaped room.
+    /// </summary>
+    private void CarveTShape(Room room)
+    {
+        int halfWidth = room.width / 2;
+        int thirdHeight = room.height / 3;
+
+        // Top horizontal bar
+        CarveRectangle(room.x, room.y + room.height - thirdHeight - 1, room.width, thirdHeight + 1);
+        // Vertical stem
+        CarveRectangle(room.x + halfWidth - 1, room.y, 3, room.height);
+    }
+
+    /// <summary>
+    /// Carves a cross-shaped room.
+    /// </summary>
+    private void CarveCross(Room room)
+    {
+        int thirdWidth = room.width / 3;
+        int thirdHeight = room.height / 3;
+
+        // Horizontal bar
+        CarveRectangle(room.x, room.y + thirdHeight, room.width, thirdHeight + 1);
+        // Vertical bar
+        CarveRectangle(room.x + thirdWidth, room.y, thirdWidth + 1, room.height);
+    }
+
+    /// <summary>
+    /// Carves a U-shaped room.
+    /// </summary>
+    private void CarveUShape(Room room)
+    {
+        int thirdWidth = room.width / 3;
+        int halfHeight = room.height / 2;
+
+        // Left vertical
+        CarveRectangle(room.x, room.y, thirdWidth + 1, room.height);
+        // Right vertical
+        CarveRectangle(room.x + room.width - thirdWidth - 1, room.y, thirdWidth + 1, room.height);
+        // Bottom horizontal
+        CarveRectangle(room.x, room.y, room.width, halfHeight);
+    }
+
+    /// <summary>
+    /// Connects two rooms with a corridor.
+    /// </summary>
+    private void ConnectRooms(Room a, Room b)
+    {
+        Vector2Int start = a.center;
+        Vector2Int end = b.center;
+
+        // Random choice: horizontal first or vertical first
+        if (UnityEngine.Random.value > 0.5f)
+        {
+            CarveHorizontalCorridor(start.x, end.x, start.y);
+            CarveVerticalCorridor(start.y, end.y, end.x);
+        }
+        else
+        {
+            CarveVerticalCorridor(start.y, end.y, start.x);
+            CarveHorizontalCorridor(start.x, end.x, end.y);
+        }
+    }
+
+    /// <summary>
+    /// Carves a horizontal corridor.
+    /// </summary>
+    private void CarveHorizontalCorridor(int x1, int x2, int y)
+    {
+        int minX = Mathf.Min(x1, x2);
+        int maxX = Mathf.Max(x1, x2);
+
+        for (int x = minX; x <= maxX; x++)
+        {
+            if (IsInsideBorder(new Vector2Int(x, y)))
+                dungeonGrid[x, y] = TileType.Floor;
+
+            // Make corridor 2 tiles wide
+            if (IsInsideBorder(new Vector2Int(x, y + 1)))
+                dungeonGrid[x, y + 1] = TileType.Floor;
+        }
+    }
+
+    /// <summary>
+    /// Carves a vertical corridor.
+    /// </summary>
+    private void CarveVerticalCorridor(int y1, int y2, int x)
+    {
+        int minY = Mathf.Min(y1, y2);
+        int maxY = Mathf.Max(y1, y2);
+
+        for (int y = minY; y <= maxY; y++)
+        {
+            if (IsInsideBorder(new Vector2Int(x, y)))
+                dungeonGrid[x, y] = TileType.Floor;
+
+            // Make corridor 2 tiles wide
+            if (IsInsideBorder(new Vector2Int(x + 1, y)))
+                dungeonGrid[x + 1, y] = TileType.Floor;
+        }
+    }
+
+    /// <summary>
+    /// Checks if a position is inside the border (not on the edge).
+    /// </summary>
+    private bool IsInsideBorder(Vector2Int pos)
+    {
+        return pos.x > 0 && pos.x < dungeonWidth - 1 && pos.y > 0 && pos.y < dungeonHeight - 1;
+    }
+
+    /// <summary>
+    /// Room data class.
+    /// </summary>
+    private class Room
+    {
+        public int x, y, width, height;
+        public RoomShape shape;
+        public Vector2Int center;
+
+        public Room(int x, int y, int width, int height, RoomShape shape)
+        {
+            this.x = x;
+            this.y = y;
+            this.width = width;
+            this.height = height;
+            this.shape = shape;
+            this.center = new Vector2Int(x + width / 2, y + height / 2);
+        }
+    }
+
+    /// <summary>
+    /// Reveals tiles within the vision radius around the player.
+    /// </summary>
+    private void RevealTilesAroundPlayer()
+    {
+        for (int x = -visionRadius; x <= visionRadius; x++)
+        {
+            for (int y = -visionRadius; y <= visionRadius; y++)
+            {
+                Vector2Int checkPos = new Vector2Int(playerPosition.x + x, playerPosition.y + y);
+
+                if (IsInBounds(checkPos))
                 {
-                    dungeonGrid[neighbor.x, neighbor.y] = TileType.Floor;
+                    // Use circular vision (optional - remove the if for square vision)
+                    if (x * x + y * y <= visionRadius * visionRadius)
+                    {
+                        revealedTiles[checkPos.x, checkPos.y] = true;
+                    }
                 }
             }
         }
-
-        // Place exit at furthest point from start
-        exitPosition = FindFurthestFloor(playerPosition);
-        dungeonGrid[exitPosition.x, exitPosition.y] = TileType.Exit;
-
-        // Place enemies on random floor tiles
-        PlaceRandomTiles(TileType.Enemy, enemyCount);
-
-        // Place chests on random floor tiles
-        PlaceRandomTiles(TileType.Chest, chestCount);
     }
 
     /// <summary>
@@ -336,7 +628,7 @@ public class DungeonManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Gets valid neighboring positions.
+    /// Gets valid neighboring positions (inside border).
     /// </summary>
     private List<Vector2Int> GetNeighbors(Vector2Int pos)
     {
@@ -346,7 +638,7 @@ public class DungeonManager : MonoBehaviour
         foreach (var dir in directions)
         {
             Vector2Int next = pos + dir;
-            if (IsInBounds(next))
+            if (IsInsideBorder(next))
                 neighbors.Add(next);
         }
 
@@ -354,16 +646,16 @@ public class DungeonManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Finds the floor tile furthest from a starting position.
+    /// Finds the floor tile furthest from a starting position (inside border).
     /// </summary>
     private Vector2Int FindFurthestFloor(Vector2Int start)
     {
         Vector2Int furthest = start;
         int maxDistance = 0;
 
-        for (int x = 0; x < dungeonWidth; x++)
+        for (int x = 1; x < dungeonWidth - 1; x++)
         {
-            for (int y = 0; y < dungeonHeight; y++)
+            for (int y = 1; y < dungeonHeight - 1; y++)
             {
                 if (dungeonGrid[x, y] == TileType.Floor)
                 {
@@ -381,15 +673,15 @@ public class DungeonManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Places a number of tiles of a specific type on random floor tiles.
+    /// Places a number of tiles of a specific type on random floor tiles (inside border).
     /// </summary>
     private void PlaceRandomTiles(TileType type, int count)
     {
         List<Vector2Int> floorTiles = new List<Vector2Int>();
 
-        for (int x = 0; x < dungeonWidth; x++)
+        for (int x = 1; x < dungeonWidth - 1; x++)
         {
-            for (int y = 0; y < dungeonHeight; y++)
+            for (int y = 1; y < dungeonHeight - 1; y++)
             {
                 if (dungeonGrid[x, y] == TileType.Floor)
                     floorTiles.Add(new Vector2Int(x, y));
@@ -406,7 +698,7 @@ public class DungeonManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Creates the visual UI for the dungeon grid.
+    /// Creates the visual UI for the dungeon viewport.
     /// </summary>
     private void CreateDungeonUI()
     {
@@ -428,11 +720,12 @@ public class DungeonManager : MonoBehaviour
             Destroy(child.gameObject);
         }
 
-        tileImages = new Image[dungeonWidth, dungeonHeight];
+        // Create viewport-sized grid (not full dungeon)
+        tileImages = new Image[viewportWidth, viewportHeight];
 
-        for (int y = dungeonHeight - 1; y >= 0; y--)
+        for (int y = viewportHeight - 1; y >= 0; y--)
         {
-            for (int x = 0; x < dungeonWidth; x++)
+            for (int x = 0; x < viewportWidth; x++)
             {
                 GameObject tile = Instantiate(tilePrefab, tileGridParent);
                 tile.SetActive(true);
@@ -446,59 +739,165 @@ public class DungeonManager : MonoBehaviour
                 {
                     img = tile.AddComponent<Image>();
                 }
-
+                
                 tileImages[x, y] = img;
             }
         }
 
         UpdateDungeonUI();
-
-        Debug.Log("Dungeon UI created with " + (dungeonWidth * dungeonHeight) + " tiles.");
+        
+        Debug.Log("Dungeon viewport created with " + (viewportWidth * viewportHeight) + " tiles.");
     }
 
     /// <summary>
-    /// Updates the dungeon UI to reflect current state.
+    /// Checks if a tile is walkable (not a wall).
+    /// </summary>
+    private bool IsWalkable(int x, int y)
+    {
+        if (!IsInBounds(new Vector2Int(x, y)))
+            return false;
+
+        TileType tile = dungeonGrid[x, y];
+        return tile != TileType.Wall;
+    }
+
+    /// <summary>
+    /// Gets the appropriate wall sprite based on neighboring tiles.
+    /// </summary>
+    private Sprite GetWallSprite(int x, int y)
+    {
+        bool top = IsWalkable(x, y + 1);
+        bool bottom = IsWalkable(x, y - 1);
+        bool left = IsWalkable(x - 1, y);
+        bool right = IsWalkable(x + 1, y);
+
+        bool topLeft = IsWalkable(x - 1, y + 1);
+        bool topRight = IsWalkable(x + 1, y + 1);
+        bool bottomLeft = IsWalkable(x - 1, y - 1);
+        bool bottomRight = IsWalkable(x + 1, y - 1);
+
+        // Outer corners (wall with two adjacent walkable sides)
+        if (bottom && right && !top && !left)
+            return cornerTopLeftSprite ?? wallSolidSprite;
+        if (bottom && left && !top && !right)
+            return cornerTopRightSprite ?? wallSolidSprite;
+        if (top && right && !bottom && !left)
+            return cornerBottomLeftSprite ?? wallSolidSprite;
+        if (top && left && !bottom && !right)
+            return cornerBottomRightSprite ?? wallSolidSprite;
+
+        // Inner corners (wall surrounded by walls but with diagonal walkable)
+        if (!top && !bottom && !left && !right)
+        {
+            if (bottomRight)
+                return innerCornerTopLeftSprite ?? wallSolidSprite;
+            if (bottomLeft)
+                return innerCornerTopRightSprite ?? wallSolidSprite;
+            if (topRight)
+                return innerCornerBottomLeftSprite ?? wallSolidSprite;
+            if (topLeft)
+                return innerCornerBottomRightSprite ?? wallSolidSprite;
+        }
+
+        // Edge walls (wall with one adjacent walkable side)
+        if (bottom && !top && !left && !right)
+            return wallTopSprite ?? wallSolidSprite;
+        if (top && !bottom && !left && !right)
+            return wallBottomSprite ?? wallSolidSprite;
+        if (right && !top && !bottom && !left)
+            return wallLeftSprite ?? wallSolidSprite;
+        if (left && !top && !bottom && !right)
+            return wallRightSprite ?? wallSolidSprite;
+
+        // Default solid wall
+        return wallSolidSprite;
+    }
+
+    /// <summary>
+    /// Updates the dungeon viewport to show tiles around the player.
+    /// Player is always in the center of the viewport.
+    /// Unrevealed tiles show as fog.
     /// </summary>
     private void UpdateDungeonUI()
     {
-        for (int x = 0; x < dungeonWidth; x++)
-        {
-            for (int y = 0; y < dungeonHeight; y++)
-            {
-                Color color = wallColor;
+        // Calculate offset to center player in viewport
+        int offsetX = playerPosition.x - (viewportWidth / 2);
+        int offsetY = playerPosition.y - (viewportHeight / 2);
 
-                if (x == playerPosition.x && y == playerPosition.y)
+        for (int vx = 0; vx < viewportWidth; vx++)
+        {
+            for (int vy = 0; vy < viewportHeight; vy++)
+            {
+                // Calculate actual dungeon position
+                int dungeonX = offsetX + vx;
+                int dungeonY = offsetY + vy;
+
+                Color color = fogColor;
+                Sprite sprite = fogSprite;
+
+                // Check if this viewport tile is the player (center of viewport)
+                if (vx == viewportWidth / 2 && vy == viewportHeight / 2)
                 {
                     color = playerColor;
+                    sprite = playerSprite;
                 }
-                else if (visitedTiles[x, y])
+                // Check if position is outside dungeon bounds
+                else if (!IsInBounds(new Vector2Int(dungeonX, dungeonY)))
+                {
+                    color = fogColor;
+                    sprite = fogSprite;
+                }
+                // Check if tile is not revealed (fog of war)
+                else if (!revealedTiles[dungeonX, dungeonY])
+                {
+                    color = fogColor;
+                    sprite = fogSprite;
+                }
+                // Check if visited
+                else if (visitedTiles[dungeonX, dungeonY])
                 {
                     color = visitedColor;
+                    sprite = visitedSprite;
                 }
                 else
                 {
-                    switch (dungeonGrid[x, y])
+                    switch (dungeonGrid[dungeonX, dungeonY])
                     {
                         case TileType.Floor:
                         case TileType.Start:
                             color = floorColor;
+                            sprite = floorSprite;
                             break;
                         case TileType.Wall:
                             color = wallColor;
+                            sprite = GetWallSprite(dungeonX, dungeonY);
                             break;
                         case TileType.Enemy:
                             color = enemyColor;
+                            sprite = enemySprite;
                             break;
                         case TileType.Chest:
                             color = chestColor;
+                            sprite = chestSprite;
                             break;
                         case TileType.Exit:
                             color = exitColor;
+                            sprite = exitSprite;
                             break;
                     }
                 }
 
-                tileImages[x, y].color = color;
+                // Apply sprite if assigned, otherwise use color
+                if (sprite != null)
+                {
+                    tileImages[vx, vy].sprite = sprite;
+                    tileImages[vx, vy].color = Color.white;
+                }
+                else
+                {
+                    tileImages[vx, vy].sprite = null;
+                    tileImages[vx, vy].color = color;
+                }
             }
         }
     }
@@ -518,6 +917,10 @@ public class DungeonManager : MonoBehaviour
 
         // Move player
         playerPosition = newPos;
+
+        // Reveal tiles around new position
+        RevealTilesAroundPlayer();
+
         UpdateDungeonUI();
 
         // Check what's on the new tile
@@ -839,7 +1242,7 @@ public class DungeonManager : MonoBehaviour
         }
 
         rewardLogText.text = log;
-
+        
         Debug.Log("Reward Log Updated: " + rewardLog.Count + " entries");
     }
 
